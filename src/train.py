@@ -22,16 +22,21 @@ import lief
 import pe_sections
 from datetime import datetime
 import warnings
+#from json_stream import load
+import json_stream
 
 GLOBAL_BENIGN_EXECUTABLES_LOCATION = "/home/stk5106/raw_byte_classifier/dataset/benign/"
 GLOBAL_MALICIOUS_EXECUTABLES_LOCATION = "/home/stk5106/raw_byte_classifier/dataset/malware/"
 GLOBAL_MAXIMUM_EXECUTABLE_SIZE = 1000000
-GLOBAL_WHOLE_EXE_FLAG = 0 #0 if you only want to look at code 1 if you want to look at whole exe
+GLOBAL_WHOLE_EXE_FLAG = 0 #0 if you only want to look at .text 1 if you want to look at whole exe 2 for functions only
 GLOBAL_EXE_MAP = '/home/stk5106/raw_byte_classifier/exe_map_updated.json'
-GLOBAL_EXECUTABLE_SECTIONS_FILE = '/home/stk5106/raw_byte_classifier/executableSections.json'
+GLOBAL_EXECUTABLE_SECTIONS_FILE = '/home/stk5106/raw_byte_classifier/results/executableSections.json' #this is for old traing set
+GLOBAL_FUNCTION_OFFSETS_FILE = '/home/stk5106/raw_byte_classifier/results/neofunction_offsets.json'
 GLOBAL_EXECUTABLE_SECTIONS_BOUNDS = []
 GLOBAL_TRAINING_RESULTS = []
 GLOBAL_VALIDATION_RESULTS = []
+GLOBAL_FUNCTION_OFFSTS_DATA = {}
+GLOBAL_MINIMUM_EXECUTABLE_SIZE = 512
 
 class MalConvConfig:
     """
@@ -154,6 +159,8 @@ class ExecutableDataset(Dataset):
     def __init__(self, annotations_file, datadirectory, transform=None):
         self.dataframe = pd.read_csv(annotations_file, sep=',', header=None)
         self.datadirectory = datadirectory
+        with open(annotations_file) as labels:
+            self.samples = [line.strip() for line in labels.readlines()]
 
     def __len__(self):
         return len(self.dataframe.index)
@@ -162,26 +169,33 @@ class ExecutableDataset(Dataset):
         fake = 0
         filename = ''
         
-        benignSamples = os.listdir(GLOBAL_BENIGN_EXECUTABLES_LOCATION)
-        maliciousSamples = os.listdir(GLOBAL_MALICIOUS_EXECUTABLES_LOCATION)
+        # benignSamples = os.listdir(GLOBAL_BENIGN_EXECUTABLES_LOCATION)
+        # maliciousSamples = os.listdir(GLOBAL_MALICIOUS_EXECUTABLES_LOCATION)
         
-        if(index >= 0 and index <= len(benignSamples) - 1):
-            filename = f'benign/{benignSamples[index]}'
+        # if(index >= 0 and index <= len(benignSamples) - 1):
+        #     filename = f'benign/{benignSamples[index]}'
 
-        elif(index >= len(benignSamples) and index <= len(benignSamples) + len(maliciousSamples)):
-            filename = f'malware/{maliciousSamples[index - len(benignSamples)]}'
+        # elif(index >= len(benignSamples) and index <= len(benignSamples) + len(maliciousSamples)):
+        #     filename = f'malware/{maliciousSamples[index - len(benignSamples)]}'
         
-        else:
-            print('[-] Invalid Index Requested')
-            exit(0)
+        # else:
+        #     print('[-] Invalid Index Requested')
+        #     exit(0)
         
-        filepath = f'/home/stk5106/raw_byte_classifier/dataset/{filename}'
+        # filepath = f'/home/stk5106/raw_byte_classifier/dataset/{filename}'
+        executableName = self.samples[index].split(',')[0]
+        filepath = f'{self.datadirectory}{executableName}'
         binaryDataVectorized, fake = readBinary(filepath)
         
         if fake == 1:
             return binaryDataVectorized, 0
 
         label = self.dataframe.iloc[index, 1]
+        if label == 'mal':
+            label = 0
+        elif label == 'ben':
+            label = 1
+            
         return binaryDataVectorized, label
 
 def custom_collate(batch):
@@ -189,6 +203,28 @@ def custom_collate(batch):
     maliciousLabels = torch.tensor([label[1] for label in batch])
     paddedBinaryVectors = pad_sequence(binaryVectors, batch_first=True, padding_value=257)
     return paddedBinaryVectors, maliciousLabels
+
+def readBinaryFunctionsOnly(path):
+    filename = path.split('/')[-1]
+    functions = GLOBAL_FUNCTION_OFFSTS_DATA[filename]
+    binaryDataRaw = b''
+    fake = 0
+    print(f'[+] Analyzing {filename}')
+    for functionName in functions:
+        startOffset = int(functions[functionName][0], 16)
+        endOffset = int(functions[functionName][1], 16)
+        length = endOffset - startOffset
+        if(length < 0):
+            binaryDataRaw = b''
+            break
+        with open(path, 'rb') as sample:
+            sample.seek(startOffset)
+            binaryDataRaw += sample.read(length)
+    if(binaryDataRaw == b'' or len(binaryDataRaw) < GLOBAL_MINIMUM_EXECUTABLE_SIZE):
+        binaryDataRaw = b'\x00'*GLOBAL_MAXIMUM_EXECUTABLE_SIZE
+        fake = 1
+    
+    return binaryDataRaw, fake
 
 '''
 TODO this is a prototype for the new readBinary for parsing the json file if we integrate luke's code
@@ -229,14 +265,15 @@ def readBinary(path):
             lief.logging.disable()
             extractor = pe_sections.GetExecutableSectionBounds(path) #calling Luke's PE sections function
             bounds, error = extractor('lief')
-        
             for sectionByteRange in bounds:
                 length = sectionByteRange[1] - sectionByteRange[0]
                 if length > 0 and sectionByteRange[0] >= 0:
                     executable.seek(sectionByteRange[0])
                     binaryDataRaw += bytearray(executable.read(length))
-        else:
+        elif(GLOBAL_WHOLE_EXE_FLAG == 1):
             binaryDataRaw = bytearray(executable.read(GLOBAL_MAXIMUM_EXECUTABLE_SIZE))
+        elif(GLOBAL_WHOLE_EXE_FLAG == 2):
+            binaryDataRaw, fake = readBinaryFunctionsOnly(path)
         
         if(binaryDataRaw == b''):
             binaryDataRaw = b'\x00'*GLOBAL_MAXIMUM_EXECUTABLE_SIZE
@@ -306,24 +343,32 @@ def train(model, trainingLoader, lossFunction, optimizer, device, datasetSize):
 
 def main():
     global GLOBAL_EXECUTABLE_SECTIONS_BOUNDS
+    global GLOBAL_FUNCTION_OFFSTS_DATA 
     
     warnings.filterwarnings("ignore", category=UserWarning) 
     
-    dataDirectory = '/home/stk5106/raw_byte_classifier/dataset/'
-    labels = '/home/stk5106/raw_byte_classifier/dataset/labels.csv'
+    dataDirectory = '/home/stk5106/raw_byte_classifier/neodataset/bin/'
+    training_labels = '/home/stk5106/raw_byte_classifier/neodataset/tr.csv'
+    validation_labels = '/home/stk5106/raw_byte_classifier/neodataset/vl.csv'
     
     with open(GLOBAL_EXECUTABLE_SECTIONS_FILE, 'r') as jsonData:
         GLOBAL_EXECUTABLE_SECTIONS_BOUNDS = json.load(jsonData)
     
-    dataset = ExecutableDataset(labels, dataDirectory, None)
+    with open(GLOBAL_FUNCTION_OFFSETS_FILE, 'r') as functionOffsets:
+        GLOBAL_FUNCTION_OFFSTS_DATA = json.load(functionOffsets)
+    
+    trainingDataset = ExecutableDataset(training_labels, dataDirectory, None)
+    validationDataset = ExecutableDataset(validation_labels, dataDirectory, None)
+    trainingSetSize = trainingDataset.__len__()
+    validationSetSize = validationDataset.__len__()
+    
+    # datasetLength = dataset.__len__()
 
-    datasetLength = dataset.__len__()
+    # trainingSetSize = int(0.8 * datasetLength)
+    # validationSetSize = datasetLength - trainingSetSize
 
-    trainingSetSize = int(0.8 * datasetLength)
-    validationSetSize = datasetLength - trainingSetSize
-
-    #TODO revert the sizes back to normal
-    trainingDataset, validationDataset = torch.utils.data.random_split(dataset, [trainingSetSize, validationSetSize])
+    # #TODO revert the sizes back to normal
+    # trainingDataset, validationDataset = torch.utils.data.random_split(dataset, [trainingSetSize, validationSetSize])
     
     print('[+] Split Dataset into training and validation set!')
 
@@ -363,7 +408,7 @@ def main():
         print(f"[+] Epoch {epoch + 1}/{epochCount} - Validation Loss: {validationLoss}\n")
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         
-        model_path = f"/home/stk5106/raw_byte_classifier/models/flem_{timestamp}_{epoch}"
+        model_path = f"/home/stk5106/raw_byte_classifier/models/flem_whole_exe_{epoch}"
         
         torch.save(model.state_dict(), model_path)
         

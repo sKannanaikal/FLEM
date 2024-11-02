@@ -3,8 +3,8 @@ import json
 import os
 
 GLOBAL_JSON_DATA = {}
-GLOBAL_DATASET_PATH = '/home/stk5106/raw_byte_classifier/dataset/disassembled'
-GLOBAL_JSON_FILE = '/home/stk5106/raw_byte_classifier/function_offsets.json'
+GLOBAL_DATASET_PATH = '/home/stk5106/raw_byte_classifier/neodataset/asm'
+GLOBAL_JSON_FILE = '/home/stk5106/raw_byte_classifier/results/neofunction_offsets.json'
 
 def analyzeDissassembled(file):
     global GLOBAL_JSON_DATA
@@ -24,6 +24,12 @@ def analyzeDissassembled(file):
         if len(addresses) >= 2:
             startingAddress = addresses[0]
             endingAddress = addresses[-2]
+            start = int(startingAddress, 16)
+            end = int(endingAddress, 16)
+            if start > end:
+                print(function)
+                print(start)
+                print(end)
         else:
             continue
         
@@ -37,10 +43,11 @@ def analyzeDissassembled(file):
     GLOBAL_JSON_DATA[file] = fileMap  
     
 def main():
-    test = '017799f79d8c33e6ae8fb28a56555a866ac0092e2dd93235c46c2c8cfbde4f01.asm'
-    testFunction = 'Catch_All@004015bf'
-    dissassemblyFiles = os.listdir(GLOBAL_DATASET_PATH)
+    # test = 'a08112fa5c43e8ed731adbeb2afab82f0d0ceadca037c7af1aadacc9e562bbc3'
+    # testFunction = 'Catch_All@004015bf'
+    # analyzeDissassembled(test)
     
+    dissassemblyFiles = os.listdir(GLOBAL_DATASET_PATH)
     for file in dissassemblyFiles:
         print(f"[+] Analyzing {file}")
         analyzeDissassembled(file)
